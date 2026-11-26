@@ -1,0 +1,4 @@
+.env
+*.ics
+__pycache__/
+service-account.json
