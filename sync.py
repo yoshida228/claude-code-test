@@ -164,6 +164,7 @@ def _comparable(body: dict) -> str:
 def plan_sync(ics_events: list[IcsEvent], google_events: list[dict]) -> dict:
     """ICS と既存の Google 予定から、追加/更新/削除の計画を作る。"""
     existing_by_uid: dict[str, dict] = {}
+    duplicate_events: list[dict] = []
     for g in google_events:
         uid = (
             g.get("extendedProperties", {})
@@ -171,9 +172,15 @@ def plan_sync(ics_events: list[IcsEvent], google_events: list[dict]) -> dict:
             .get("timetree_uid")
         )
         if uid:
-            existing_by_uid[uid] = g
+            if uid in existing_by_uid:
+                # 同じ uid の予定が複数ある = 重複。片方だけ残して削除する
+                duplicate_events.append(g)
+            else:
+                existing_by_uid[uid] = g
 
     plan = {"insert": [], "update": [], "delete": [], "unchanged": 0}
+    for g in duplicate_events:
+        plan["delete"].append({"id": g["id"], "summary": g.get("summary", "")})
     seen_uids: set[str] = set()
     for ev in ics_events:
         seen_uids.add(ev.uid)
