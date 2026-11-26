@@ -1,1 +1,28 @@
+name: TimeTree to Google Calendar sync
 
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Export TimeTree calendar to ICS
+        env:
+          TIMETREE_EMAIL: ${{ secrets.TIMETREE_EMAIL }}
+          TIMETREE_PASSWORD: ${{ secrets.TIMETREE_PASSWORD }}
+        run: |
+          timetree-exporter -e "$TIMETREE_EMAIL" -c "${{ secrets.TIMETREE_CALENDAR_CODE }}" -o timetree.ics
+      - name: Sync ICS to Google Calendar
+        env:
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python sync.py --ics timetree.ics
