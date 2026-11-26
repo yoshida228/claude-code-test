@@ -27,7 +27,10 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 
 # ---------------------------------------------------------------- ICS 解析
@@ -156,9 +159,33 @@ def to_google_event(ev: IcsEvent) -> dict:
 
 # ------------------------------------------------------------------- 同期
 
+def _norm_when(v):
+    """開始/終了日時を比較可能な形にそろえる。
+
+    Google は dateTime をオフセット付き（+09:00 など）で返し、
+    timeZone キーを落とすことがある。表記の違いだけで「変更あり」と
+    誤判定しないよう、UTC の絶対時刻に正規化して比較する。
+    """
+    if not isinstance(v, dict):
+        return v
+    if "date" in v:
+        return {"date": v["date"]}
+    raw = v.get("dateTime", "")
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return v
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo(v.get("timeZone", "Asia/Tokyo")))
+    return {"dateTime": dt.astimezone(timezone.utc).isoformat()}
+
+
 def _comparable(body: dict) -> str:
     keys = ("summary", "description", "location", "start", "end", "recurrence")
-    return json.dumps({k: body.get(k) for k in keys}, sort_keys=True, ensure_ascii=False)
+    part = {k: body.get(k) for k in keys}
+    part["start"] = _norm_when(part.get("start"))
+    part["end"] = _norm_when(part.get("end"))
+    return json.dumps(part, sort_keys=True, ensure_ascii=False)
 
 
 def plan_sync(ics_events: list[IcsEvent], google_events: list[dict]) -> dict:
@@ -206,6 +233,24 @@ def plan_sync(ics_events: list[IcsEvent], google_events: list[dict]) -> dict:
         if uid not in seen_uids:
             plan["delete"].append({"id": g["id"], "summary": g.get("summary", "")})
     return plan
+
+
+def _execute_with_retry(request, label: str = ""):
+    """レート制限（403/429）や一時エラーで止まらないよう、間隔を空けて再試行する。"""
+    from googleapiclient.errors import HttpError
+
+    delay = 2.0
+    for attempt in range(6):
+        try:
+            return request.execute()
+        except HttpError as e:
+            status = getattr(e.resp, "status", None)
+            retryable = status in (403, 429, 500, 502, 503)
+            if not retryable or attempt == 5:
+                raise
+            print(f"  {label} レート制限/一時エラー (HTTP {status})、{delay:.0f}秒待って再試行します")
+            time.sleep(delay)
+            delay = min(delay * 2, 60.0)
 
 
 def _google_service():
@@ -272,13 +317,24 @@ def main() -> int:
     )
 
     for body in plan["insert"]:
-        service.events().insert(calendarId=calendar_id, body=body).execute()
+        _execute_with_retry(
+            service.events().insert(calendarId=calendar_id, body=body), "追加"
+        )
+        time.sleep(0.1)
     for item in plan["update"]:
-        service.events().update(
-            calendarId=calendar_id, eventId=item["id"], body=item["body"]
-        ).execute()
+        _execute_with_retry(
+            service.events().update(
+                calendarId=calendar_id, eventId=item["id"], body=item["body"]
+            ),
+            "更新",
+        )
+        time.sleep(0.1)
     for item in plan["delete"]:
-        service.events().delete(calendarId=calendar_id, eventId=item["id"]).execute()
+        _execute_with_retry(
+            service.events().delete(calendarId=calendar_id, eventId=item["id"]),
+            "削除",
+        )
+        time.sleep(0.1)
     print("同期が完了しました")
     return 0
 
